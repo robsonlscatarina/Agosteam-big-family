@@ -1,1 +1,350 @@
+import { useState, useRef, useEffect } from "react";
 
+// ─── CONTEXTO DO PRODUTO ────────────────────────────────────────────────────
+// No Claude.ai: contexto embutido aqui mesmo.
+// No Vercel: substituir por import.meta.env.VITE_PRODUCT_CONTEXT
+import.meta.env.VITE_PRODUCT_CONTEXT
+
+const TEAM = {
+  coach:    { id:"coach",    name:"Lineu",       role:"Coach de PM",          color:"#6EE7B7", bg:"#064E3B", emoji:"🎯", desc:"PM sênior. Estratégia, JTBD, OST, RICE. Questiona o 'por quê'." },
+  designer: { id:"designer", name:"Beicola",     role:"Product Designer",     color:"#C4B5FD", bg:"#4C1D95", emoji:"🎨", desc:"UX/Service Design. Jornada do associado, momentos de verdade." },
+  analyst:  { id:"analyst",  name:"Tuco",        role:"Analista de Negócios", color:"#FCD34D", bg:"#78350F", emoji:"📊", desc:"Financeiro/cooperativismo. ROI, viabilidade, regulatório, benchmarks." },
+  techlead: { id:"techlead", name:"Bebel",       role:"Tech Lead",             color:"#67E8F9", bg:"#164E63", emoji:"⚙️", desc:"Arquitetura financeira/APIs. Viabilidade técnica, legado, escalabilidade." },
+  qa:       { id:"qa",       name:"Agostinho",   role:"QA Engineer",           color:"#FCA5A5", bg:"#7F1D1D", emoji:"🔍", desc:"Qualidade e risco. Edge cases, critérios aceite, consistência." }
+};
+
+// ── OTIMIZAÇÃO 3: Haiku — modelo mais barato ────────────────────────────────
+const MODEL = "claude-haiku-4-5-20251001";
+
+// ── SYSTEM PROMPTS separados por chamada ────────────────────────────────────
+const SYNTHESIS_PROMPT = `${PLATFORM_CONTEXT}
+
+MEMBROS: ${Object.values(TEAM).map(m=>`${m.name}(${m.id}):${m.desc}`).join(' | ')}
+
+TAREFA: Selecione 2-3 membros mais relevantes para o input. Lineu(coach) sempre encerra.
+SELEÇÃO: técnica→techlead; UX→designer; negócio→analyst; risco→qa; estratégia ampla→coach+analyst+1.
+
+FORMATO JSON puro:
+{"selected_members":["id1","id2"],"synthesis":"2-3 frases: conclusão + recomendação","questions":["q1","q2"]}
+
+Português brasileiro. JSON válido, sem markdown.`;
+
+const DEBATE_PROMPT = `${PLATFORM_CONTEXT}
+
+MEMBROS: ${Object.values(TEAM).map(m=>`${m.name}(${m.id}):${m.desc}`).join(' | ')}
+
+TAREFA: Gere o debate entre os membros listados em selected_members sobre o tema fornecido.
+Cada membro: 2-3 frases diretas. Lineu encerra com direcionamento.
+
+FORMATO JSON puro:
+{"debate":[{"member":"id","message":"fala do membro"}]}
+
+Português brasileiro. JSON válido, sem markdown.`;
+
+// ── OTIMIZAÇÃO 2: Histórico como resumo rolante (máx. 6 trocas) ─────────────
+const MAX_HISTORY = 6;
+
+function buildHistory(messages) {
+  const exchanges = messages.filter(m => m.role);
+  if (exchanges.length <= MAX_HISTORY) return exchanges.map(m => ({ role: m.role, content: m.content }));
+
+  // Comprime os mais antigos em um resumo e mantém os últimos MAX_HISTORY
+  const old = exchanges.slice(0, exchanges.length - MAX_HISTORY);
+  const recent = exchanges.slice(exchanges.length - MAX_HISTORY);
+
+  const summaryLines = old
+    .filter(m => m.role === "user")
+    .map(m => `- ${m.content.slice(0, 120)}`).join("\n");
+
+  const summary = {
+    role: "user",
+    content: `[RESUMO DE TÓPICOS ANTERIORES]\n${summaryLines}\n[FIM DO RESUMO — continue a partir daqui]`
+  };
+
+  return [summary, { role: "assistant", content: "Entendido. Continuando." }, ...recent.map(m => ({ role: m.role, content: m.content }))];
+}
+
+async function callAPI(systemPrompt, messages, maxTokens = 600) {
+  const response = await fetch("https://api.anthropic.com/v1/messages", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "anthropic-version": "2023-06-01",
+      "anthropic-dangerous-direct-browser-access": "true"
+    },
+    body: JSON.stringify({ model: MODEL, max_tokens: maxTokens, system: systemPrompt, messages })
+  });
+  const data = await response.json();
+  const raw = data.content?.map(i => i.text || "").join("") || "";
+  try { return JSON.parse(raw.replace(/```json|```/g, "").trim()); }
+  catch { return null; }
+}
+
+export default function Agosteam() {
+  const [messages, setMessages] = useState([]);
+  const [input, setInput] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [loadingDebate, setLoadingDebate] = useState({});
+  const [expandedDebate, setExpandedDebate] = useState({});
+  const bottomRef = useRef(null);
+
+  useEffect(() => { bottomRef.current?.scrollIntoView({ behavior: "smooth" }); }, [messages, loading]);
+
+  const handleKeyDown = (e) => {
+    if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendMessage(); }
+  };
+
+  // ── CHAMADA PRINCIPAL: apenas síntese ──────────────────────────────────────
+  const sendMessage = async () => {
+    if (!input.trim() || loading) return;
+    const userMsg = input.trim();
+    setInput("");
+    setLoading(true);
+
+    const newUserMsg = { type: "user", content: userMsg, role: "user" };
+    setMessages(prev => [...prev, newUserMsg]);
+
+    const history = buildHistory([...messages, newUserMsg]);
+
+    try {
+      const parsed = await callAPI(SYNTHESIS_PROMPT, history, 400);
+      const id = Date.now();
+      setMessages(prev => [...prev, {
+        type: "team", id, role: "assistant",
+        content: JSON.stringify(parsed),
+        synthesis: parsed?.synthesis || "Erro ao processar resposta.",
+        questions: parsed?.questions || [],
+        selected_members: parsed?.selected_members || [],
+        debate: null // debate ainda não gerado
+      }]);
+    } catch {
+      setMessages(prev => [...prev, { type: "error", content: "Erro ao conectar. Tente novamente." }]);
+    }
+    setLoading(false);
+  };
+
+  // ── CHAMADA SOB DEMANDA: somente ao clicar "Ver debate" ────────────────────
+  const fetchDebate = async (msgId, selectedMembers, topic) => {
+    setLoadingDebate(prev => ({ ...prev, [msgId]: true }));
+    try {
+      const parsed = await callAPI(DEBATE_PROMPT, [{
+        role: "user",
+        content: `Tema: ${topic}\nMembros selecionados: ${selectedMembers.join(", ")}`
+      }], 600);
+
+      setMessages(prev => prev.map(m =>
+        m.id === msgId ? { ...m, debate: parsed?.debate || [] } : m
+      ));
+      setExpandedDebate(prev => ({ ...prev, [msgId]: true }));
+    } catch {
+      setMessages(prev => prev.map(m =>
+        m.id === msgId ? { ...m, debate: [] } : m
+      ));
+    }
+    setLoadingDebate(prev => ({ ...prev, [msgId]: false }));
+  };
+
+  const toggleDebate = (msg) => {
+    if (expandedDebate[msg.id]) {
+      setExpandedDebate(prev => ({ ...prev, [msg.id]: false }));
+      return;
+    }
+    if (msg.debate !== null) {
+      setExpandedDebate(prev => ({ ...prev, [msg.id]: true }));
+      return;
+    }
+    // Primeira vez: buscar da API
+    const userMsg = messages.find((m, i) => {
+      const teamIdx = messages.indexOf(msg);
+      return m.type === "user" && i < teamIdx;
+    });
+    const topic = userMsg?.content || "tópico anterior";
+    fetchDebate(msg.id, msg.selected_members, topic);
+  };
+
+  const S = {
+    root: { minHeight:"100vh", background:"#0A0F1E", fontFamily:"'IBM Plex Mono','Courier New',monospace", display:"flex", flexDirection:"column", color:"#E2E8F0" },
+    header: { borderBottom:"1px solid #1E293B", padding:"16px 24px", background:"linear-gradient(135deg,#0F172A,#0A0F1E)", display:"flex", alignItems:"center", gap:16, flexShrink:0 },
+    headerIcon: { width:40, height:40, background:"linear-gradient(135deg,#6EE7B7,#3B82F6)", borderRadius:10, display:"flex", alignItems:"center", justifyContent:"center", fontSize:20 },
+    feed: { flex:1, overflowY:"auto", padding:"24px", display:"flex", flexDirection:"column", gap:20 },
+    userBubble: { maxWidth:"65%", background:"linear-gradient(135deg,#1E3A5F,#1E293B)", border:"1px solid #2D4A6E", borderRadius:"16px 16px 4px 16px", padding:"12px 16px", fontSize:13, lineHeight:1.7, color:"#CBD5E1" },
+    synthBox: { background:"linear-gradient(135deg,#0F2027,#0F172A)", border:"1px solid #1E3A5F", borderRadius:14, padding:"18px 20px", position:"relative" },
+    pill: (color) => ({ position:"absolute", top:-11, left:20, background:"#0A0F1E", padding:"2px 10px", fontSize:10, color, letterSpacing:"0.15em", border:"1px solid #1E3A5F", borderRadius:20 }),
+    toggleBtn: (accent) => ({ background:"transparent", border:`1px solid ${accent||"#1E293B"}`, borderRadius:8, padding:"8px 14px", color:accent||"#64748B", fontSize:11, cursor:"pointer", letterSpacing:"0.08em", display:"flex", alignItems:"center", gap:8, width:"fit-content", transition:"all 0.2s" }),
+    memberAvatar: (m) => ({ width:32, height:32, flexShrink:0, background:m.bg, borderRadius:"50%", border:`2px solid ${m.color}40`, display:"flex", alignItems:"center", justifyContent:"center", fontSize:14, marginTop:4 }),
+    memberBubble: (m) => ({ flex:1, background:"#0F172A", border:`1px solid ${m.color}20`, borderRadius:"4px 12px 12px 12px", padding:"12px 14px" }),
+    qBox: { background:"#0F0F1E", border:"1px solid #312E81", borderRadius:12, padding:"16px 18px" },
+    inputArea: { borderTop:"1px solid #1E293B", padding:"14px 20px", background:"#0A0F1E", display:"flex", gap:10, alignItems:"flex-end", flexShrink:0 },
+    inputWrap: { flex:1, background:"#0F172A", border:"1px solid #1E293B", borderRadius:12, display:"flex", alignItems:"flex-end", padding:"10px 14px" },
+    sendBtn: (disabled) => ({ width:42, height:42, background:disabled?"#1E293B":"linear-gradient(135deg,#6EE7B7,#3B82F6)", border:"none", borderRadius:10, cursor:disabled?"not-allowed":"pointer", display:"flex", alignItems:"center", justifyContent:"center", fontSize:16, flexShrink:0, transition:"all 0.2s" })
+  };
+
+  return (
+    <div style={S.root}>
+      {/* Header */}
+      <div style={S.header}>
+        <div style={S.headerIcon}>⚡</div>
+        <div>
+          <div style={{ fontSize:14, fontWeight:700, letterSpacing:"0.05em", color:"#F1F5F9" }}>AGOSTEAM</div>
+          <div style={{ fontSize:10, color:"#64748B", letterSpacing:"0.08em", marginTop:2 }}>Meu produto digital :D {Object.keys(TEAM).length} MEMBROS</div>
+        </div>
+        <div style={{ marginLeft:"auto", display:"flex", gap:6 }}>
+          {Object.values(TEAM).map(m => (
+            <div key={m.id} title={`${m.name} · ${m.role}`} style={{ width:30, height:30, background:m.bg, borderRadius:"50%", border:`2px solid ${m.color}30`, display:"flex", alignItems:"center", justifyContent:"center", fontSize:13 }}>{m.emoji}</div>
+          ))}
+        </div>
+      </div>
+
+      {/* Feed */}
+      <div style={S.feed}>
+        {messages.length === 0 && (
+          <div style={{ textAlign:"center", padding:"50px 20px" }}>
+            <div style={{ fontSize:42, marginBottom:14 }}>🏛️</div>
+            <div style={{ fontSize:13, color:"#475569", lineHeight:1.8, maxWidth:440, margin:"0 auto" }}>
+              O Agosteam está pronto. Descreva um problema, hipótese ou decisão.<br/>
+              <span style={{ fontSize:11, color:"#334155" }}>O time seleciona quem é mais relevante para cada questão.</span>
+            </div>
+            <div style={{ display:"flex", flexWrap:"wrap", gap:8, justifyContent:"center", marginTop:20 }}>
+              {["Como melhorar a jornada operacional?","Como medir melhor o uso do meu produto?","Quais melhorar as metricas atuais?"].map(s => (
+                <button key={s} onClick={() => setInput(s)}
+                  style={{ background:"#0F172A", border:"1px solid #1E293B", color:"#94A3B8", borderRadius:20, padding:"7px 14px", fontSize:11, cursor:"pointer" }}
+                  onMouseEnter={e=>{e.currentTarget.style.borderColor="#6EE7B7";e.currentTarget.style.color="#6EE7B7"}}
+                  onMouseLeave={e=>{e.currentTarget.style.borderColor="#1E293B";e.currentTarget.style.color="#94A3B8"}}
+                >{s}</button>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {messages.map((msg, idx) => {
+          if (msg.type === "user") return (
+            <div key={idx} style={{ display:"flex", justifyContent:"flex-end" }}>
+              <div style={S.userBubble}>
+                <div style={{ fontSize:10, color:"#64748B", marginBottom:5, letterSpacing:"0.1em" }}>VOCÊ</div>
+                {msg.content}
+              </div>
+            </div>
+          );
+
+          if (msg.type === "error") return (
+            <div key={idx} style={{ background:"#1C0A0A", border:"1px solid #7F1D1D", borderRadius:10, padding:"12px 16px", color:"#FCA5A5", fontSize:13 }}>{msg.content}</div>
+          );
+
+          if (msg.type === "team") {
+            const isOpen = expandedDebate[msg.id];
+            const isLoadingDebate = loadingDebate[msg.id];
+            const activeMembers = (msg.selected_members||[]).map(id => TEAM[id]).filter(Boolean);
+            const debateReady = msg.debate !== null;
+
+            return (
+              <div key={idx} style={{ display:"flex", flexDirection:"column", gap:12 }}>
+
+                {/* Membros acionados */}
+                {activeMembers.length > 0 && (
+                  <div style={{ display:"flex", gap:6, alignItems:"center", flexWrap:"wrap" }}>
+                    <span style={{ fontSize:10, color:"#475569", letterSpacing:"0.1em" }}>ACIONADOS:</span>
+                    {activeMembers.map(m => (
+                      <div key={m.id} style={{ display:"flex", alignItems:"center", gap:5, background:m.bg, border:`1px solid ${m.color}30`, borderRadius:20, padding:"3px 10px" }}>
+                        <span style={{ fontSize:11 }}>{m.emoji}</span>
+                        <span style={{ fontSize:10, color:m.color, letterSpacing:"0.08em" }}>{m.name}</span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                {/* Síntese */}
+                <div style={S.synthBox}>
+                  <div style={S.pill("#6EE7B7")}>SÍNTESE</div>
+                  <p style={{ fontSize:13, lineHeight:1.8, color:"#CBD5E1", margin:0 }}>{msg.synthesis}</p>
+                </div>
+
+                {/* Botão debate — OTIMIZAÇÃO 1: 2ª chamada só quando solicitado */}
+                <button
+                  onClick={() => toggleDebate(msg)}
+                  disabled={isLoadingDebate}
+                  style={S.toggleBtn(isLoadingDebate ? "#334155" : undefined)}
+                >
+                  {isLoadingDebate ? (
+                    <>
+                      <span style={{ animation:"spin 1s linear infinite", display:"inline-block" }}>⟳</span>
+                      CARREGANDO DEBATE...
+                    </>
+                  ) : (
+                    <>
+                      <span>{isOpen ? "▾" : "▸"}</span>
+                      {!debateReady ? "PEDIR DEBATE AO TIME" : isOpen ? "OCULTAR DEBATE" : `VER DEBATE (${msg.debate?.length||0} falas)`}
+                    </>
+                  )}
+                </button>
+
+                {/* Debate renderizado */}
+                {isOpen && debateReady && (
+                  <div style={{ display:"flex", flexDirection:"column", gap:10 }}>
+                    {(msg.debate||[]).map((d, di) => {
+                      const member = TEAM[d.member];
+                      if (!member) return null;
+                      return (
+                        <div key={di} style={{ display:"flex", gap:10, alignItems:"flex-start" }}>
+                          <div style={S.memberAvatar(member)}>{member.emoji}</div>
+                          <div style={S.memberBubble(member)}>
+                            <div style={{ fontSize:10, color:member.color, letterSpacing:"0.12em", marginBottom:6, fontWeight:700 }}>{member.name} · {member.role}</div>
+                            <p style={{ fontSize:12.5, lineHeight:1.75, color:"#94A3B8", margin:0 }}>{d.message}</p>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+
+                {/* Perguntas */}
+                {msg.questions?.length > 0 && (
+                  <div style={S.qBox}>
+                    <div style={{ fontSize:10, color:"#818CF8", letterSpacing:"0.15em", marginBottom:12, fontWeight:700 }}>❓ PERGUNTAS DO TIME</div>
+                    {msg.questions.map((q, qi) => (
+                      <div key={qi} style={{ display:"flex", gap:10, alignItems:"flex-start", marginBottom: qi < msg.questions.length-1 ? 10 : 0 }}>
+                        <div style={{ width:20, height:20, flexShrink:0, background:"#1E1B4B", borderRadius:"50%", border:"1px solid #4338CA", display:"flex", alignItems:"center", justifyContent:"center", fontSize:10, color:"#818CF8", fontWeight:700, marginTop:2 }}>{qi+1}</div>
+                        <p style={{ fontSize:12.5, lineHeight:1.7, color:"#A5B4FC", margin:0, cursor:"pointer" }}
+                          onClick={() => setInput(q)} title="Clique para usar">{q}</p>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            );
+          }
+          return null;
+        })}
+
+        {loading && (
+          <div style={{ display:"flex", gap:10, alignItems:"center", padding:"6px 0" }}>
+            <div style={{ width:32, height:32, background:"#0F172A", border:"1px solid #1E293B", borderRadius:"50%", display:"flex", alignItems:"center", justifyContent:"center", fontSize:14 }}>💬</div>
+            <div style={{ background:"#0F172A", border:"1px solid #1E293B", borderRadius:"4px 12px 12px 12px", padding:"12px 18px", display:"flex", gap:5, alignItems:"center" }}>
+              {[0,1,2].map(i => <div key={i} style={{ width:5, height:5, background:"#475569", borderRadius:"50%", animation:"pulse 1.4s ease-in-out infinite", animationDelay:`${i*0.2}s` }} />)}
+              <span style={{ fontSize:10, color:"#475569", marginLeft:8, letterSpacing:"0.08em" }}>analisando...</span>
+            </div>
+          </div>
+        )}
+        <div ref={bottomRef} />
+      </div>
+
+      {/* Input */}
+      <div style={S.inputArea}>
+        <div style={S.inputWrap}>
+          <textarea value={input} onChange={e=>setInput(e.target.value)} onKeyDown={handleKeyDown}
+            placeholder="Descreva um problema, hipótese ou decisão..." rows={2}
+            style={{ flex:1, background:"transparent", border:"none", outline:"none", color:"#CBD5E1", fontSize:13, lineHeight:1.7, resize:"none", fontFamily:"inherit" }} />
+        </div>
+        <button onClick={sendMessage} disabled={loading||!input.trim()} style={S.sendBtn(loading||!input.trim())}>↑</button>
+      </div>
+
+      <style>{`
+        @keyframes pulse{0%,80%,100%{opacity:.3;transform:scale(.8)}40%{opacity:1;transform:scale(1)}}
+        @keyframes spin{from{transform:rotate(0deg)}to{transform:rotate(360deg)}}
+        *{box-sizing:border-box}
+        ::-webkit-scrollbar{width:4px}::-webkit-scrollbar-track{background:transparent}::-webkit-scrollbar-thumb{background:#1E293B;border-radius:2px}
+        textarea::placeholder{color:#334155}
+      `}</style>
+    </div>
+  );
+  }
+                    
