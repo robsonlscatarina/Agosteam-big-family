@@ -143,10 +143,11 @@ export default function Agosteam() {
       }], 600);
 
       setMessages(prev => prev.map(m =>
-        m.id === msgId ? { ...m, debate: parsed?.debate || [] } : m
+        m.id === msgId ? { ...m, debate: Array.isArray(parsed?.debate) ? parsed.debate : [] } : m
       ));
       setExpandedDebate(prev => ({ ...prev, [msgId]: true }));
-    } catch {
+    } catch (err) {
+      console.error("fetchDebate error:", err);
       setMessages(prev => prev.map(m =>
         m.id === msgId ? { ...m, debate: [] } : m
       ));
@@ -289,11 +290,21 @@ export default function Agosteam() {
                 </button>
 
                 {/* Debate renderizado */}
-                {isOpen && debateReady && (
+                {isOpen && (
                   <div style={{ display:"flex", flexDirection:"column", gap:10 }}>
-                    {(msg.debate||[]).map((d, di) => {
-                      const member = TEAM[d.member];
-                      if (!member) return null;
+                    {!debateReady ? (
+                      <div style={{ fontSize:12, color:"#475569", padding:"10px 14px", background:"#0F172A", borderRadius:10, border:"1px solid #1E293B" }}>
+                        Nenhuma fala gerada. Tente pedir o debate novamente.
+                      </div>
+                    ) : (msg.debate||[]).length === 0 ? (
+                      <div style={{ fontSize:12, color:"#475569", padding:"10px 14px", background:"#0F172A", borderRadius:10, border:"1px solid #1E293B" }}>
+                        O time não retornou falas. Tente novamente.
+                      </div>
+                    ) : (msg.debate||[]).map((d, di) => {
+                      // Busca o membro pelo id exato ou pelo name como fallback
+                      const member = TEAM[d.member]
+                        || Object.values(TEAM).find(m => m.name?.toLowerCase() === d.member?.toLowerCase())
+                        || Object.values(TEAM)[di % Object.values(TEAM).length];
                       return (
                         <div key={di} style={{ display:"flex", gap:10, alignItems:"flex-start" }}>
                           <div style={S.memberAvatar(member)}>{member.emoji}</div>
