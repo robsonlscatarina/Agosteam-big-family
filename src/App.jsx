@@ -3,7 +3,7 @@ import { useState, useRef, useEffect } from "react";
 // ─── CONTEXTO DO PRODUTO ────────────────────────────────────────────────────
 // No Claude.ai: contexto embutido aqui mesmo.
 // No Vercel: substituir por import.meta.env.VITE_PRODUCT_CONTEXT
-import.meta.env.VITE_PRODUCT_CONTEXT
+const PLATFORM_CONTEXT = import.meta.env.VITE_PRODUCT_CONTEXT || "";
 
 const TEAM = {
   coach:    { id:"coach",    name:"Lineu",       role:"Coach de PM",          color:"#6EE7B7", bg:"#064E3B", emoji:"🎯", desc:"PM sênior. Estratégia, JTBD, OST, RICE. Questiona o 'por quê'." },
