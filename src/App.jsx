@@ -16,6 +16,10 @@ const TEAM = {
 // ── OTIMIZAÇÃO 3: Haiku — modelo mais barato ────────────────────────────────
 const MODEL = "claude-haiku-4-5-20251001";
 
+// ── TOKENS AUMENTADOS PARA MELHOR QUALIDADE ──────────────────────────────────
+const TOKENS_SYNTHESIS = 1500;
+const TOKENS_DEBATE    = 1500;
+
 // ── SYSTEM PROMPTS separados por chamada ────────────────────────────────────
 const SYNTHESIS_PROMPT = `${PLATFORM_CONTEXT}
 
@@ -25,7 +29,7 @@ TAREFA: Selecione 2-3 membros mais relevantes para o input. Lineu(coach) sempre 
 SELEÇÃO: técnica→techlead; UX→designer; negócio→analyst; risco→qa; estratégia ampla→coach+analyst+1.
 
 FORMATO JSON puro:
-{"selected_members":["id1","id2"],"synthesis":"2-3 frases: conclusão + recomendação","questions":["q1","q2"]}
+{"selected_members":["id1","id2"],"synthesis":"síntese aprofundada com conclusão e recomendação","questions":["q1","q2"]}
 
 Português brasileiro. JSON válido, sem markdown.`;
 
@@ -34,14 +38,14 @@ const DEBATE_PROMPT = `${PLATFORM_CONTEXT}
 MEMBROS: ${Object.values(TEAM).map(m=>`${m.name}(${m.id}):${m.desc}`).join(' | ')}
 
 TAREFA: Gere o debate entre os membros listados em selected_members sobre o tema fornecido.
-Cada membro: 2-3 frases diretas. Lineu encerra com direcionamento.
+Cada membro: raciocínio aprofundado com sua perspectiva específica. Lineu encerra com direcionamento.
 
 FORMATO JSON puro:
 {"debate":[{"member":"id","message":"fala do membro"}]}
 
 Português brasileiro. JSON válido, sem markdown.`;
 
-// ── OTIMIZAÇÃO 2: Histórico como resumo rolante (máx. 6 trocas) ─────────────
+// ── HISTÓRICO COMO RESUMO ROLANTE (máx. 6 trocas) ───────────────────────────
 const MAX_HISTORY = 6;
 
 function buildHistory(messages) {
@@ -56,16 +60,24 @@ function buildHistory(messages) {
     .filter(m => m.role === "user")
     .map(m => `- ${m.content.slice(0, 120)}`).join("\n");
 
-  const summary = {
-    role: "user",
-    content: `[RESUMO DE TÓPICOS ANTERIORES]\n${summaryLines}\n[FIM DO RESUMO — continue a partir daqui]`
-  };
+  return [
+    { role: "user", content: `[RESUMO TÓPICOS ANTERIORES]\n${summaryLines}\n[FIM DO RESUMO]` },
+    { role: "assistant", content: "Entendido. Continuando." },
+    ...recent.map(m => ({ role: m.role, content: m.content }))
+  ];
 
-  return [summary, { role: "assistant", content: "Entendido. Continuando." }, ...recent.map(m => ({ role: m.role, content: m.content }))];
 }
 
-async function callAPI(systemPrompt, messages, maxTokens = 600) {
-  // Funciona no Vercel (Vite) e no Claude.ai (sem import.meta.env)
+// ── RETRY COM BACKOFF EXPONENCIAL — até 3 tentativas ────────────────────────
+// Aguarda antes de tentar novamente: 2s → 4s → 8s
+// Funciona para qualquer erro de API (529, 500, 503, timeout, etc.)
+const sleep = ms => new Promise(res => setTimeout(res, ms));
+
+async function callAPIWithRetry(systemPrompt, messages, maxTokens, attempt = 1) {
+  const MAX_ATTEMPTS = 3;
+  const BACKOFF_BASE = 2000; // 2 segundos base
+
+
   const apiKey = (() => {
     try { return import.meta.env?.VITE_ANTHROPIC_API_KEY || ""; }
     catch { return ""; }
@@ -78,23 +90,50 @@ async function callAPI(systemPrompt, messages, maxTokens = 600) {
   };
   if (apiKey) headers["x-api-key"] = apiKey;
 
-  const response = await fetch("https://api.anthropic.com/v1/messages", {
-    method: "POST",
-    headers,
-    body: JSON.stringify({ model: MODEL, max_tokens: maxTokens, system: systemPrompt, messages })
-  });
-  const data = await response.json();
-  const raw = data.content?.map(i => i.text || "").join("") || "";
-  try { return JSON.parse(raw.replace(/```json|```/g, "").trim()); }
-  catch { return null; }
+  try {
+    const response = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ model: MODEL, max_tokens: maxTokens, system: systemPrompt, messages })
+    });
+
+    // Erros HTTP (529 overload, 500, 503, etc.) — tenta novamente
+    if (!response.ok) {
+      const errBody = await response.json().catch(() => ({}));
+      const errMsg = errBody?.error?.message || `HTTP ${response.status}`;
+      console.warn(`[Agosteam] Tentativa ${attempt}/${MAX_ATTEMPTS} falhou: ${errMsg}`);
+
+      if (attempt < MAX_ATTEMPTS) {
+        await sleep(BACKOFF_BASE * Math.pow(2, attempt - 1)); // 2s, 4s, 8s
+        return callAPIWithRetry(systemPrompt, messages, maxTokens, attempt + 1);
+      }
+      throw new Error(`API falhou após ${MAX_ATTEMPTS} tentativas: ${errMsg}`);
+    }
+
+    const data = await response.json();
+    const raw = data.content?.map(i => i.text || "").join("") || "";
+    try { return JSON.parse(raw.replace(/```json|```/g, "").trim()); }
+    catch { return null; }
+
+  } catch (err) {
+    // Erros de rede (timeout, conexão) — tenta novamente
+    if (attempt < MAX_ATTEMPTS) {
+      console.warn(`[Agosteam] Tentativa ${attempt}/${MAX_ATTEMPTS} erro de rede: ${err.message}`);
+      await sleep(BACKOFF_BASE * Math.pow(2, attempt - 1));
+      return callAPIWithRetry(systemPrompt, messages, maxTokens, attempt + 1);
+    }
+    throw err;
+  }
+
 }
 
 
 export default function Agosteam() {
-  const [messages, setMessages] = useState([]);
-  const [input, setInput] = useState("");
-  const [loading, setLoading] = useState(false);
-  const [loadingDebate, setLoadingDebate] = useState({});
+  const [messages, setMessages]             = useState([]);
+  const [input, setInput]                   = useState("");
+  const [loading, setLoading]               = useState(false);
+  const [loadingDebate, setLoadingDebate]   = useState({});
+  const [retryInfo, setRetryInfo]           = useState({}); // rastreia tentativas visíveis ao usuário
   const [expandedDebate, setExpandedDebate] = useState({});
   const bottomRef = useRef(null);
 
@@ -104,20 +143,40 @@ export default function Agosteam() {
     if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendMessage(); }
   };
 
-  // ── CHAMADA PRINCIPAL: apenas síntese ──────────────────────────────────────
+  // ── CHAMADA PRINCIPAL: síntese com retry ────────────────────────────────────
   const sendMessage = async () => {
     if (!input.trim() || loading) return;
     const userMsg = input.trim();
     setInput("");
     setLoading(true);
+    setRetryInfo(prev => ({ ...prev, synthesis: null }));
 
     const newUserMsg = { type: "user", content: userMsg, role: "user" };
     setMessages(prev => [...prev, newUserMsg]);
 
     const history = buildHistory([...messages, newUserMsg]);
+    // Avisa o usuário se estiver retentando
+    const onRetry = (attempt) => {
+      setRetryInfo(prev => ({ ...prev, synthesis: attempt }));
+    };
+
 
     try {
-      const parsed = await callAPI(SYNTHESIS_PROMPT, history, 400);
+      // Wrapper para expor tentativas ao usuário
+      let attempt = 1;
+      const parsed = await (async () => {
+        while (attempt <= 3) {
+          try {
+            return await callAPIWithRetry(SYNTHESIS_PROMPT, history, TOKENS_SYNTHESIS, attempt);
+          } catch (err) {
+            if (attempt === 3) throw err;
+            attempt++;
+            onRetry(attempt);
+            await sleep(2000 * Math.pow(2, attempt - 2));
+          }
+        }
+      })();
+
       const id = Date.now();
       setMessages(prev => [...prev, {
         type: "team", id, role: "assistant",
@@ -128,31 +187,48 @@ export default function Agosteam() {
         debate: null // debate ainda não gerado
       }]);
     } catch {
-      setMessages(prev => [...prev, { type: "error", content: "Erro ao conectar. Tente novamente." }]);
+      setMessages(prev => [...prev, {
+        type: "error",
+        content: "Deu ruim, mals aí. :(  Não foi possível conectar após 3 tentativas. Verifica a conexão e tenta novamente."
+      }]);
     }
     setLoading(false);
   };
 
   // ── CHAMADA SOB DEMANDA: somente ao clicar "Ver debate" ────────────────────
   const fetchDebate = async (msgId, selectedMembers, topic) => {
-    setLoadingDebate(prev => ({ ...prev, [msgId]: true }));
+    setLoadingDebate(prev => ({ ...prev, [msgId]: { loading: true, attempt: 1 } }));
     try {
-      const parsed = await callAPI(DEBATE_PROMPT, [{
-        role: "user",
-        content: `Tema: ${topic}\nMembros selecionados: ${selectedMembers.join(", ")}`
-      }], 600);
+      let attempt = 1;
+      const parsed = await (async () => {
+        while (attempt <= 3) {
+          try {
+            const result = await callAPIWithRetry(DEBATE_PROMPT, [{
+              role: "user",
+              content: `Tema: ${topic}\nMembros selecionados: ${selectedMembers.join(", ")}`
+            }], TOKENS_DEBATE, attempt);
+            return result;
+          } catch (err) {
+            if (attempt === 3) throw err;
+            attempt++;
+            setLoadingDebate(prev => ({ ...prev, [msgId]: { loading: true, attempt } }));
+            await sleep(2000 * Math.pow(2, attempt - 2));
+          }
+        }
+      })();
+
 
       setMessages(prev => prev.map(m =>
         m.id === msgId ? { ...m, debate: Array.isArray(parsed?.debate) ? parsed.debate : [] } : m
       ));
       setExpandedDebate(prev => ({ ...prev, [msgId]: true }));
     } catch (err) {
-      console.error("fetchDebate error:", err);
+      console.error("fetchDebate falhou após 3 tentativas:", err);
       setMessages(prev => prev.map(m =>
         m.id === msgId ? { ...m, debate: [] } : m
       ));
     }
-    setLoadingDebate(prev => ({ ...prev, [msgId]: false }));
+    setLoadingDebate(prev => ({ ...prev, [msgId]: { loading: false, attempt: 1 } }));
   };
 
   const toggleDebate = (msg) => {
@@ -244,7 +320,9 @@ export default function Agosteam() {
 
           if (msg.type === "team") {
             const isOpen = expandedDebate[msg.id];
-            const isLoadingDebate = loadingDebate[msg.id];
+            const debateState = loadingDebate[msg.id] || { loading: false, attempt: 1 };
+            const isLoadingDebate = debateState.loading;
+            const debateAttempt = debateState.attempt;
             const activeMembers = (msg.selected_members||[]).map(id => TEAM[id]).filter(Boolean);
             const debateReady = msg.debate !== null;
 
@@ -270,7 +348,7 @@ export default function Agosteam() {
                   <p style={{ fontSize:13, lineHeight:1.8, color:"#CBD5E1", margin:0 }}>{msg.synthesis}</p>
                 </div>
 
-                {/* Botão debate — OTIMIZAÇÃO 1: 2ª chamada só quando solicitado */}
+                {/* Botão debate */}
                 <button
                   onClick={() => toggleDebate(msg)}
                   disabled={isLoadingDebate}
@@ -279,7 +357,9 @@ export default function Agosteam() {
                   {isLoadingDebate ? (
                     <>
                       <span style={{ animation:"spin 1s linear infinite", display:"inline-block" }}>⟳</span>
-                      CARREGANDO DEBATE...
+                      {debateAttempt > 1
+                        ? `TENTATIVA ${debateAttempt}/3...`
+                        : "CARREGANDO DEBATE..."}
                     </>
                   ) : (
                     <>
@@ -336,13 +416,17 @@ export default function Agosteam() {
           }
           return null;
         })}
-
+        {/* Loading síntese com indicador de retry */}
         {loading && (
           <div style={{ display:"flex", gap:10, alignItems:"center", padding:"6px 0" }}>
             <div style={{ width:32, height:32, background:"#0F172A", border:"1px solid #1E293B", borderRadius:"50%", display:"flex", alignItems:"center", justifyContent:"center", fontSize:14 }}>💬</div>
             <div style={{ background:"#0F172A", border:"1px solid #1E293B", borderRadius:"4px 12px 12px 12px", padding:"12px 18px", display:"flex", gap:5, alignItems:"center" }}>
               {[0,1,2].map(i => <div key={i} style={{ width:5, height:5, background:"#475569", borderRadius:"50%", animation:"pulse 1.4s ease-in-out infinite", animationDelay:`${i*0.2}s` }} />)}
-              <span style={{ fontSize:10, color:"#475569", marginLeft:8, letterSpacing:"0.08em" }}>analisando...</span>
+              <span style={{ fontSize:10, color:"#475569", marginLeft:8, letterSpacing:"0.08em" }}>
+                {retryInfo.synthesis
+                  ? `tentativa ${retryInfo.synthesis}/3...`
+                  : "analisando..."}
+              </span>
             </div>
           </div>
         )}
