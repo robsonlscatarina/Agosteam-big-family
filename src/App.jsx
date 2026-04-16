@@ -61,7 +61,7 @@ function buildHistory(messages) {
     content: `[RESUMO DE TÓPICOS ANTERIORES]\n${summaryLines}\n[FIM DO RESUMO — continue a partir daqui]`
   };
 
-  return [summary, { role: "assistant", content: "Entendido. Continuando." }, ...recent.map(m => ({ role: m.role, content: m.content }))];
+  return [summary, { role: "coach", content: "Entendido. Continuando." }, ...recent.map(m => ({ role: m.role, content: m.content }))];
 }
 
 async function callAPI(systemPrompt, messages, maxTokens = 600) {
@@ -120,7 +120,7 @@ export default function Agosteam() {
       const parsed = await callAPI(SYNTHESIS_PROMPT, history, 400);
       const id = Date.now();
       setMessages(prev => [...prev, {
-        type: "team", id, role: "assistant",
+        type: "team", id, role: "coach",
         content: JSON.stringify(parsed),
         synthesis: parsed?.synthesis || "Erro ao processar resposta.",
         questions: parsed?.questions || [],
