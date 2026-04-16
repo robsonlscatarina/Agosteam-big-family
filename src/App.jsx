@@ -65,14 +65,22 @@ function buildHistory(messages) {
 }
 
 async function callAPI(systemPrompt, messages, maxTokens = 600) {
+  // Funciona no Vercel (Vite) e no Claude.ai (sem import.meta.env)
+  const apiKey = (() => {
+    try { return import.meta.env?.VITE_ANTHROPIC_API_KEY || ""; }
+    catch { return ""; }
+  })();
+
+  const headers = {
+    "Content-Type": "application/json",
+    "anthropic-version": "2023-06-01",
+    "anthropic-dangerous-direct-browser-access": "true",
+  };
+  if (apiKey) headers["x-api-key"] = apiKey;
+
   const response = await fetch("https://api.anthropic.com/v1/messages", {
     method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-    "x-api-key": import.meta.env.VITE_ANTHROPIC_API_KEY,
-      "anthropic-version": "2023-06-01",
-      "anthropic-dangerous-direct-browser-access": "true"
-    },
+    headers,
     body: JSON.stringify({ model: MODEL, max_tokens: maxTokens, system: systemPrompt, messages })
   });
   const data = await response.json();
@@ -80,6 +88,7 @@ async function callAPI(systemPrompt, messages, maxTokens = 600) {
   try { return JSON.parse(raw.replace(/```json|```/g, "").trim()); }
   catch { return null; }
 }
+
 
 export default function Agosteam() {
   const [messages, setMessages] = useState([]);
@@ -155,10 +164,11 @@ export default function Agosteam() {
       return;
     }
     // Primeira vez: buscar da API
-    const userMsg = messages.find((m, i) => {
-      const teamIdx = messages.indexOf(msg);
-      return m.type === "user" && i < teamIdx;
-    });
+    // Encontra a mensagem do usuário imediatamente anterior a este bloco do time
+    const teamIdx = messages.findIndex(m => m.type === "team" && m.id === msg.id);
+    const userMsg = teamIdx > 0
+      ? [...messages].slice(0, teamIdx).reverse().find(m => m.type === "user")
+      : null;
     const topic = userMsg?.content || "tópico anterior";
     fetchDebate(msg.id, msg.selected_members, topic);
   };
@@ -202,7 +212,7 @@ export default function Agosteam() {
           <div style={{ textAlign:"center", padding:"50px 20px" }}>
             <div style={{ fontSize:42, marginBottom:14 }}>🏛️</div>
             <div style={{ fontSize:13, color:"#475569", lineHeight:1.8, maxWidth:440, margin:"0 auto" }}>
-              O Agosteam está pronto. Descreva um problema, hipótese ou decisão.<br/>
+              O Agosteam está pronto. Descreva um problema, hipótese ou decisão. O Lineuzinho ta se coçando pra te criticar...<br/>
               <span style={{ fontSize:11, color:"#334155" }}>O time seleciona quem é mais relevante para cada questão.</span>
             </div>
             <div style={{ display:"flex", flexWrap:"wrap", gap:8, justifyContent:"center", marginTop:20 }}>
@@ -255,7 +265,7 @@ export default function Agosteam() {
 
                 {/* Síntese */}
                 <div style={S.synthBox}>
-                  <div style={S.pill("#6EE7B7")}>SÍNTESE</div>
+                  <div style={S.pill("#6EE7B7")}>RESPOSTA CURTA E GROSSA</div>
                   <p style={{ fontSize:13, lineHeight:1.8, color:"#CBD5E1", margin:0 }}>{msg.synthesis}</p>
                 </div>
 
@@ -300,7 +310,7 @@ export default function Agosteam() {
                 {/* Perguntas */}
                 {msg.questions?.length > 0 && (
                   <div style={S.qBox}>
-                    <div style={{ fontSize:10, color:"#818CF8", letterSpacing:"0.15em", marginBottom:12, fontWeight:700 }}>❓ PERGUNTAS DO TIME</div>
+                    <div style={{ fontSize:10, color:"#818CF8", letterSpacing:"0.15em", marginBottom:12, fontWeight:700 }}>❓ PERGUNTAS DO LINEU</div>
                     {msg.questions.map((q, qi) => (
                       <div key={qi} style={{ display:"flex", gap:10, alignItems:"flex-start", marginBottom: qi < msg.questions.length-1 ? 10 : 0 }}>
                         <div style={{ width:20, height:20, flexShrink:0, background:"#1E1B4B", borderRadius:"50%", border:"1px solid #4338CA", display:"flex", alignItems:"center", justifyContent:"center", fontSize:10, color:"#818CF8", fontWeight:700, marginTop:2 }}>{qi+1}</div>
