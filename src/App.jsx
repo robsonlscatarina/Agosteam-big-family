@@ -112,8 +112,26 @@ async function callAPIWithRetry(systemPrompt, messages, maxTokens, attempt = 1) 
 
     const data = await response.json();
     const raw = data.content?.map(i => i.text || "").join("") || "";
-    try { return JSON.parse(raw.replace(/```json|```/g, "").trim()); }
-    catch { return null; }
+
+    // Tenta parse direto primeiro
+    const cleaned = raw.replace(/```json|```/g, "").trim();
+    try {
+      return JSON.parse(cleaned);
+    } catch {
+      // Tenta extrair JSON de dentro do texto (modelo às vezes adiciona texto antes/depois)
+      const jsonMatch = cleaned.match(/\{[\s\S]*\}/);
+      if (jsonMatch) {
+        try { return JSON.parse(jsonMatch[0]); } catch {}
+      }
+      // Tenta extrair array de debate diretamente se o objeto estiver quebrado
+      const arrayMatch = cleaned.match(/"debate"\s*:\s*(\[[\s\S]*?\])/);
+      if (arrayMatch) {
+        try { return { debate: JSON.parse(arrayMatch[1]) }; } catch {}
+      }
+      console.warn("[Agosteam] Parse falhou. Raw response:", raw.slice(0, 500));
+      return null;
+    }
+
 
   } catch (err) {
     // Erros de rede (timeout, conexão) — tenta novamente
@@ -193,6 +211,8 @@ export default function Agosteam() {
       }]);
     }
     setLoading(false);
+    setRetryInfo(prev => ({ ...prev, synthesis: null }));
+    
   };
 
   // ── CHAMADA SOB DEMANDA: somente ao clicar "Ver debate" ────────────────────
@@ -219,7 +239,11 @@ export default function Agosteam() {
 
 
       setMessages(prev => prev.map(m =>
-        m.id === msgId ? { ...m, debate: Array.isArray(parsed?.debate) ? parsed.debate : [] } : m
+        m.id === msgId
+          ? { ...m, debate: Array.isArray(parsed?.debate) && parsed.debate.length > 0
+              ? parsed.debate
+              : [] }
+          : m
       ));
       setExpandedDebate(prev => ({ ...prev, [msgId]: true }));
     } catch (err) {
@@ -377,8 +401,17 @@ export default function Agosteam() {
                         Nenhuma fala gerada. Tente pedir o debate novamente.
                       </div>
                     ) : (msg.debate||[]).length === 0 ? (
-                      <div style={{ fontSize:12, color:"#475569", padding:"10px 14px", background:"#0F172A", borderRadius:10, border:"1px solid #1E293B" }}>
-                        O time não retornou falas. Tente novamente.
+                      <div style={{ fontSize:12, color:"#475569", padding:"12px 14px", background:"#0F172A", borderRadius:10, border:"1px solid #1E293B", display:"flex", alignItems:"center", justifyContent:"space-between", gap:12 }}>
+                        <span>Não foi possível carregar as falas.</span>
+                        <button
+                          onClick={() => {
+                            // Reseta o debate para null para permitir nova tentativa
+                            setMessages(prev => prev.map(m => m.id === msg.id ? { ...m, debate: null } : m));
+                            setExpandedDebate(prev => ({ ...prev, [msg.id]: false }));
+                          }}
+                          style={{ background:"#1E293B", border:"1px solid #334155", color:"#94A3B8", borderRadius:6, padding:"4px 10px", fontSize:10, cursor:"pointer", letterSpacing:"0.08em", whiteSpace:"nowrap" }}
+                        >↺ TENTAR NOVAMENTE</button>
+
                       </div>
                     ) : (msg.debate||[]).map((d, di) => {
                       // Busca o membro pelo id exato ou pelo name como fallback
