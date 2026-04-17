@@ -6,11 +6,16 @@ import { useState, useRef, useEffect } from "react";
 const PLATFORM_CONTEXT = import.meta.env.VITE_PRODUCT_CONTEXT || "";
 
 const TEAM = {
-  coach:    { id:"coach",    name:"Lineu",       role:"Coach de PM",          color:"#6EE7B7", bg:"#064E3B", emoji:"🎯", desc:"PM sênior. Estratégia, JTBD, OST, RICE. Questiona o 'por quê'." },
-  designer: { id:"designer", name:"Beicola",     role:"Product Designer",     color:"#C4B5FD", bg:"#4C1D95", emoji:"🎨", desc:"UX/Service Design. Jornada do associado, momentos de verdade." },
-  analyst:  { id:"analyst",  name:"Tuco",        role:"Analista de Negócios", color:"#FCD34D", bg:"#78350F", emoji:"📊", desc:"Financeiro/cooperativismo. ROI, viabilidade, regulatório, benchmarks." },
-  techlead: { id:"techlead", name:"Bebel",       role:"Tech Lead",             color:"#67E8F9", bg:"#164E63", emoji:"⚙️", desc:"Arquitetura financeira/APIs. Viabilidade técnica, legado, escalabilidade." },
-  qa:       { id:"qa",       name:"Agostinho",   role:"QA Engineer",           color:"#FCA5A5", bg:"#7F1D1D", emoji:"🔍", desc:"Qualidade e risco. Edge cases, critérios aceite, consistência." }
+  coach:    { id:"coach",    name:"Lineu",    role:"Coach de PM",                      color:"#6EE7B7", bg:"#064E3B", emoji:"🎯", desc:"PM sênior e coach implacável. Estratégia, JTBD, OST, RICE. Questiona o 'por quê' com dureza — não aceita premissas vagas, hipóteses sem dados nem soluções disfarçadas de problema. Confronta vieses, expõe contradições e exige clareza antes de qualquer avanço. Encerra sempre com um direcionamento firme e sem rodeios." },
+  designer: { id:"designer", name:"Beiçola",   role:"Product Designer",                  color:"#C4B5FD", bg:"#4C1D95", emoji:"🎨", desc:"UX/Service Design. Jornada do usuário, momentos de verdade, acessibilidade e consistência visual. Defende a experiência com dados de comportamento." },
+  analyst:  { id:"analyst",  name:"Agostinho",role:"Analista de Negócios",              color:"#FCD34D", bg:"#78350F", emoji:"📊", desc:"Financeiro e regulatório. ROI, viabilidade, benchmarks, impacto por segmento (PF/Agro/PJ). Aterramento econômico das decisões." },
+  techlead: { id:"techlead", name:"Tuco",    role:"Tech Lead",                          color:"#67E8F9", bg:"#164E63", emoji:"⚙️", desc:"Arquitetura financeira/APIs. Viabilidade técnica, legado, escalabilidade e integrações. Aponta riscos de implementação e débito técnico." },
+  qa:       { id:"qa",       name:"Nenê",    role:"QA Engineer",                        color:"#FCA5A5", bg:"#7F1D1D", emoji:"🔍", desc:"Qualidade e risco. Edge cases, critérios de aceite, cobertura de testes e consistência entre canais." },
+  pmtech:   { id:"pmtech",   name:"Vavá",    role:"PM Técnico",                         color:"#86EFAC", bg:"#14532D", emoji:"🛠️", desc:"PM com forte base técnica. Traduz requisitos de produto em especificações precisas para engenharia, avalia trade-offs de arquitetura com visão de produto, identifica dependências críticas e riscos técnicos antes que virem problema." },
+  pmproduct:{ id:"pmproduct",name:"Marilda", role:"PM de Produto",                      color:"#FDBA74", bg:"#7C2D12", emoji:"🧩", desc:"PM com foco profundo nas nuances do produto. Domina o comportamento do usuário por segmento, ciclo de vida do produto, posicionamento, priorização e coerência de proposta de valor. Garante que cada decisão sirva ao produto como um todo, não só à feature isolada." },
+  change:   { id:"change",   name:"Mendonça",role:"Gestão de Mudança",                  color:"#F0ABFC", bg:"#581C87", emoji:"🔄", desc:"Especialista em adoção e transição. Mapeia stakeholders impactados, antecipa resistências, estrutura comunicação, treinamento e rituais de acompanhamento. Garante que mudanças técnicas e de produto se convertam em adoção real." },
+  security: { id:"security", name:"Floriano",role:"Analista de Segurança da Informação",color:"#FDE68A", bg:"#713F12", emoji:"🔐", desc:"Segurança da informação e conformidade. Avalia riscos de exposição de dados, requisitos regulatórios (LGPD, BC), controles de acesso, autenticação e superfícies de ataque. Garante que as decisões de produto não criem brechas de segurança." }
+
 };
 
 // ── OTIMIZAÇÃO 3: Haiku — modelo mais barato ────────────────────────────────
@@ -25,8 +30,9 @@ const SYNTHESIS_PROMPT = `${PLATFORM_CONTEXT}
 
 MEMBROS: ${Object.values(TEAM).map(m=>`${m.name}(${m.id}):${m.desc}`).join(' | ')}
 
-TAREFA: Selecione 2-3 membros mais relevantes para o input. Lineu(coach) sempre encerra.
-SELEÇÃO: técnica→techlead; UX→designer; negócio→analyst; risco→qa; estratégia ampla→coach+analyst+1.
+TAREFA: Selecione 2-4 membros mais relevantes para o input. Lineu(coach) sempre encerra.
+SELEÇÃO: técnica→techlead+pmtech; UX→designer; negócio→analyst; risco→qa; mudança/adoção→change; segurança/fraude→security; estratégia ampla→coach+analyst+pmproduct; nuances de produto→pmproduct.
+
 
 FORMATO JSON puro:
 {"selected_members":["id1","id2"],"synthesis":"síntese aprofundada com conclusão e recomendação","questions":["q1","q2"]}
@@ -38,7 +44,7 @@ const DEBATE_PROMPT = `${PLATFORM_CONTEXT}
 MEMBROS: ${Object.values(TEAM).map(m=>`${m.name}(${m.id}):${m.desc}`).join(' | ')}
 
 TAREFA: Gere o debate entre os membros listados em selected_members sobre o tema fornecido.
-Cada membro: raciocínio aprofundado com sua perspectiva específica. Lineu encerra com direcionamento.
+Cada membro: raciocínio aprofundado com sua perspectiva específica. Lineu encerra com direcionamento firme e crítico — aponta o que está faltando, o que está errado e o que precisa acontecer.
 
 FORMATO JSON puro:
 {"debate":[{"member":"id","message":"fala do membro"}]}
