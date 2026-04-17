@@ -79,7 +79,7 @@ function buildHistory(messages) {
 // Funciona para qualquer erro de API (529, 500, 503, timeout, etc.)
 const sleep = ms => new Promise(res => setTimeout(res, ms));
 
-async function callAPIWithRetry(systemPrompt, messages, maxTokens, attempt = 1) {
+async function callAPIWithRetry(systemPrompt, messages, maxTokens, attempt = 1, onRetry = null) {
   const MAX_ATTEMPTS = 3;
   const BACKOFF_BASE = 2000; // 2 segundos base
 
@@ -110,8 +110,11 @@ async function callAPIWithRetry(systemPrompt, messages, maxTokens, attempt = 1) 
       console.warn(`[Agosteam] Tentativa ${attempt}/${MAX_ATTEMPTS} falhou: ${errMsg}`);
 
       if (attempt < MAX_ATTEMPTS) {
-        await sleep(BACKOFF_BASE * Math.pow(2, attempt - 1)); // 2s, 4s, 8s
-        return callAPIWithRetry(systemPrompt, messages, maxTokens, attempt + 1);
+        const next = attempt + 1;
+        if (onRetry) onRetry(next);
+        await sleep(BACKOFF_BASE * Math.pow(2, attempt - 1));
+        return callAPIWithRetry(systemPrompt, messages, maxTokens, next, onRetry);
+
       }
       throw new Error(`API falhou após ${MAX_ATTEMPTS} tentativas: ${errMsg}`);
     }
@@ -131,10 +134,9 @@ async function callAPIWithRetry(systemPrompt, messages, maxTokens, attempt = 1) 
       }
       // Tenta extrair array de debate diretamente se o objeto estiver quebrado
       const arrayMatch = cleaned.match(/"debate"\s*:\s*(\[[\s\S]*?\])/);
-      if (arrayMatch) {
-        try { return { debate: JSON.parse(arrayMatch[1]) }; } catch {}
-      }
-      console.warn("[Agosteam] Parse falhou. Raw response:", raw.slice(0, 500));
+      if (arrayMatch) { try { return { debate: JSON.parse(arrayMatch[1]) }; } catch {} }
+      console.warn("[Agosteam] Parse falhou. Raw:", raw.slice(0, 500));
+
       return null;
     }
 
@@ -142,9 +144,12 @@ async function callAPIWithRetry(systemPrompt, messages, maxTokens, attempt = 1) 
   } catch (err) {
     // Erros de rede (timeout, conexão) — tenta novamente
     if (attempt < MAX_ATTEMPTS) {
+            const next = attempt + 1;
       console.warn(`[Agosteam] Tentativa ${attempt}/${MAX_ATTEMPTS} erro de rede: ${err.message}`);
+      if (onRetry) onRetry(next);
+      
       await sleep(BACKOFF_BASE * Math.pow(2, attempt - 1));
-      return callAPIWithRetry(systemPrompt, messages, maxTokens, attempt + 1);
+      return callAPIWithRetry(systemPrompt, messages, maxTokens, next, onRetry);
     }
     throw err;
   }
@@ -186,20 +191,11 @@ export default function Agosteam() {
 
 
     try {
-      // Wrapper para expor tentativas ao usuário
-      let attempt = 1;
-      const parsed = await (async () => {
-        while (attempt <= 3) {
-          try {
-            return await callAPIWithRetry(SYNTHESIS_PROMPT, history, TOKENS_SYNTHESIS, attempt);
-          } catch (err) {
-            if (attempt === 3) throw err;
-            attempt++;
-            onRetry(attempt);
-            await sleep(2000 * Math.pow(2, attempt - 2));
-          }
-        }
-      })();
+          const parsed = await callAPIWithRetry(
+        SYNTHESIS_PROMPT, history, TOKENS_SYNTHESIS, 1,
+        (attempt) => setRetryInfo(prev => ({ ...prev, synthesis: attempt }))
+      );
+
 
       const id = Date.now();
       setMessages(prev => [...prev, {
@@ -225,23 +221,12 @@ export default function Agosteam() {
   const fetchDebate = async (msgId, selectedMembers, topic) => {
     setLoadingDebate(prev => ({ ...prev, [msgId]: { loading: true, attempt: 1 } }));
     try {
-      let attempt = 1;
-      const parsed = await (async () => {
-        while (attempt <= 3) {
-          try {
-            const result = await callAPIWithRetry(DEBATE_PROMPT, [{
-              role: "user",
-              content: `Tema: ${topic}\nMembros selecionados: ${selectedMembers.join(", ")}`
-            }], TOKENS_DEBATE, attempt);
-            return result;
-          } catch (err) {
-            if (attempt === 3) throw err;
-            attempt++;
-            setLoadingDebate(prev => ({ ...prev, [msgId]: { loading: true, attempt } }));
-            await sleep(2000 * Math.pow(2, attempt - 2));
-          }
-        }
-      })();
+      const parsed = await callAPIWithRetry(
+        DEBATE_PROMPT,
+        [{ role: "user", content: `Tema: ${topic}\nMembros selecionados: ${selectedMembers.join(", ")}` }],
+        TOKENS_DEBATE, 1,
+        (attempt) => setLoadingDebate(prev => ({ ...prev, [msgId]: { loading: true, attempt } }))
+      );
 
 
       setMessages(prev => prev.map(m =>
